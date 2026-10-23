@@ -112,6 +112,8 @@ test('plugin adds start line keys to the full 130824 sample', async () => {
     setPluginError () {},
     setPluginStatus () {},
     getSelfPath (p) { return self[p] },
+    on () {},
+    removeListener () {},
     emit (event, msg) { if (event === 'nmea2000out') sent.push(msg) }
   }
   const plugin = require('../index.js')(app)

@@ -194,3 +194,20 @@ If a display shows a value with the wrong sign, that is the place to change (`li
 The plugin does not answer the Zeus ping command (PGN 130850). The line has to be set in Racer; the MFD then only displays it.
 
 The start line keys add up to about 90 bytes. If the whole 130824 would go over the 223-byte fast-packet limit, the line keys are left out and the plugin reports an error.
+
+## Race timer from the plotter
+
+With **Race timer from the plotter** on (default), the plugin listens for the MFD's race timer commands, PGN 130850 *Simnet: Event Command: Timer* (canboat `simnetEventCommandTimer`, event type 23), and passes them to signalk-racer's start clock with `PUT navigation.racing.setStartTime`:
+
+| MFD event | Code | Racer |
+|---|---:|---|
+| Race Timer Start | 61 | `start` (after setting the length, if one came with the command) |
+| Race Timer Stop | 62 | `stop` (needs a Racer with the `stop` command) |
+| Race Timer Sync | 63 | `sync` (to the nearest minute) |
+| Race Timer Reset | 64 | `reset`, then the length, if one came with the command |
+
+In emulate mode the raw frames from the bus are read; otherwise the server's decoded `N2KAnalyzerOut` is used. The same command seen twice within a second is handled once.
+
+Racer then runs the clock, and the plugin sends it back to the displays as key 117 while it runs (`navigation.racing.startTime` set), with or without a start line.
+
+**Assumption:** canboat does not say where the countdown length travels. The plugin takes Parameter 2 as seconds when it is 1–3600 and turns it into a Racer `adjust`. If the length you set on the plotter does not reach Racer, enable debug for this plugin: every received timer command is logged with its raw parameters (`MFD race timer from …`).

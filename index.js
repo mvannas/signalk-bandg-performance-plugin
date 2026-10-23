@@ -11,7 +11,8 @@ const {
   fastPacketFrames,
   payloadLength
 } = require('./lib/performance-pgn')
-const { computeStartLine, encodeStartLine, START_LINE_KEYS } = require('./lib/start-line')
+const { computeStartLine, encodeStartLine, encodeStartLineValue, START_LINE_KEYS } = require('./lib/start-line')
+const { parseTimerEvent, parseTimerFields, racerCommands, lengthToAdjust } = require('./lib/race-timer')
 var H5000_UNIQUE_NUMBER = 1731561
 var globalOptions = []
 const performancePGN = '%s,3,130824,%s,255,%s,7d,99'
@@ -77,6 +78,11 @@ module.exports = function (app) {
           raceTimer: {
             type: 'boolean',
             title: 'Send race timer (key 117) from navigation.racing.timeToStart while the timer runs',
+            default: true
+          },
+          timerFromMfd: {
+            type: 'boolean',
+            title: 'Race timer from the plotter: pass start / stop / sync / reset (PGN 130850) to Racer\'s start clock',
             default: true
           },
           timeToBurn: {
@@ -801,42 +807,99 @@ module.exports = function (app) {
       gpsFromBow: Number(o.gpsFromBow) || 0,
       boatLength: Number(o.boatLength) || undefined,
       raceTimer: o.raceTimer !== false,
+      timerFromMfd: o.timerFromMfd !== false,
       timeToBurn: o.timeToBurn !== false
     }
   }
 
-  // B&G start line keys for the full 130824, or '' with no line.
+  // B&G start line keys and race timer for the full 130824, or ''.
   function startLineTail () {
     var opts = startLineOptions()
-    if (!opts.enabled) return ''
+    var tail = ''
     var port = selfValue('navigation.racing.startLinePort')
     var stb = selfValue('navigation.racing.startLineStb')
-    if (!port || !stb) return ''
 
-    var heading = selfValue('navigation.headingTrue')
-    if (typeof heading != 'number') heading = selfValue('navigation.courseOverGroundTrue')
-    var design = selfValue('design.length')
-    var timerRunning = !!selfValue('navigation.racing.startTime')
+    if (opts.enabled && port && stb) {
+      var heading = selfValue('navigation.headingTrue')
+      if (typeof heading != 'number') heading = selfValue('navigation.courseOverGroundTrue')
+      var design = selfValue('design.length')
 
-    var values = computeStartLine({
-      port: port,
-      stb: stb,
-      position: selfValue('navigation.position'),
-      heading: heading,
-      gpsFromBow: opts.gpsFromBow,
-      windDirection: selfValue('environment.wind.directionTrue'),
-      boatLength: opts.boatLength || (design && design.overall),
-      timeToStart: opts.raceTimer && timerRunning ? selfValue('navigation.racing.timeToStart') : undefined,
-      timeToBurn: opts.timeToBurn ? selfValue('navigation.racing.timeToBurn') : undefined
-    })
-    if (!values) return ''
+      var values = computeStartLine({
+        port: port,
+        stb: stb,
+        position: selfValue('navigation.position'),
+        heading: heading,
+        gpsFromBow: opts.gpsFromBow,
+        windDirection: selfValue('environment.wind.directionTrue'),
+        boatLength: opts.boatLength || (design && design.overall),
+        timeToBurn: opts.timeToBurn ? selfValue('navigation.racing.timeToBurn') : undefined
+      })
 
-    var enabled = new Set(Object.keys(START_LINE_KEYS))
-    // Key 305 can also be configured as a plain value; never send it twice.
-    if (valueConfig('biasAdvantage', supportedValues.biasAdvantage, globalOptions.biasAdvantage).enabled) {
-      enabled.delete('biasAdvantage')
+      var enabled = new Set(Object.keys(START_LINE_KEYS))
+      // Key 305 can also be configured as a plain value; never send it twice.
+      if (valueConfig('biasAdvantage', supportedValues.biasAdvantage, globalOptions.biasAdvantage).enabled) {
+        enabled.delete('biasAdvantage')
+      }
+      tail += encodeStartLine(values, enabled)
     }
-    return encodeStartLine(values, enabled)
+
+    // The race timer does not need a line: Racer's clock, while it runs.
+    if (opts.raceTimer && selfValue('navigation.racing.startTime')) {
+      var timeToStart = selfValue('navigation.racing.timeToStart')
+      var timer = encodeStartLineValue('raceTimer', typeof timeToStart == 'number' ? -timeToStart : undefined)
+      if (timer) tail += ',' + timer
+    }
+    return tail
+  }
+
+  // Race timer start/stop/sync/reset from the MFD (PGN 130850) → Racer's
+  // start clock (PUT navigation.racing.setStartTime). The command can
+  // arrive both raw (emulate) and decoded (N2KAnalyzerOut); one is enough.
+  var lastTimerEvent = { key: '', at: 0 }
+
+  function handleTimerEvent (event, src) {
+    if (!event || !startLineOptions().timerFromMfd) return
+    var key = event.command + ':' + event.parameter2
+    var now = Date.now()
+    if (key === lastTimerEvent.key && now - lastTimerEvent.at < 1000) return
+    lastTimerEvent = { key: key, at: now }
+    app.debug('MFD race timer from %s: %j', src, event)
+    runRacerSteps(racerCommands(event))
+  }
+
+  function runRacerSteps (steps) {
+    if (!steps.length) return
+    var step = steps[0]
+    var payload = step
+    if (step.command === 'length') {
+      payload = lengthToAdjust(step.seconds, selfValue('navigation.racing.timeToStart'))
+    }
+    if (!payload) return runRacerSteps(steps.slice(1))
+    putRacer(payload, () => runRacerSteps(steps.slice(1)))
+  }
+
+  function putRacer (payload, done) {
+    var finished = false
+    var finish = (reply) => {
+      if (finished) return
+      if (reply && reply.state && reply.state !== 'COMPLETED') return
+      finished = true
+      if (reply && reply.statusCode && reply.statusCode >= 300) {
+        app.debug('Racer setStartTime %j: %j', payload, reply)
+      }
+      done()
+    }
+    setTimeout(finish, 1000)
+    if (typeof app.putSelfPath != 'function') {
+      app.debug('app.putSelfPath not available; cannot set Racer timer')
+      return
+    }
+    try {
+      var result = app.putSelfPath('navigation.racing.setStartTime', payload, finish)
+      if (result && typeof result.then == 'function') result.then(finish, finish)
+    } catch (err) {
+      app.debug('Racer setStartTime failed: %s', err.message)
+    }
   }
 
   function sendN2k (msg) {
@@ -990,6 +1053,9 @@ module.exports = function (app) {
 
       if (globalOptions.emulate == true) {
 	      simpleCan.messageCb = (msg) => {
+	        if (msg.pgn.pgn === 130850 && msg.pgn.src != simpleCan.candevice.address) {
+	          handleTimerEvent(parseTimerEvent(msg.data), msg.pgn.src)
+	        }
 	        if (duplicatePGNs.includes(msg.pgn.pgn) == true && msg.pgn.src != simpleCan.candevice.address) {
 	          // app.debug(msg)
 	          // Resend from this plugin id
@@ -1009,6 +1075,12 @@ module.exports = function (app) {
       app.debug('simpleCan.candevice.address: %j', simpleCan.candevice.address)
       deviceAddress = simpleCan.candevice.address
     }
+
+    var onAnalyzer = function (n2k) {
+      handleTimerEvent(parseTimerFields(n2k), n2k && n2k.src)
+    }
+    app.on('N2KAnalyzerOut', onAnalyzer)
+    unsubscribes.push(() => app.removeListener('N2KAnalyzerOut', onAnalyzer))
 
     function sendKeepAlive () {
       let msg = util.format(keepAlivePGN, (new Date()).toISOString(), sourceAddress)
