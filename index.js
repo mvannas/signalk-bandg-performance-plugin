@@ -8,8 +8,10 @@ const {
   encodeTrueWindDirection130306,
   encodeOptimumWindAngle,
   canIdForPgn,
-  fastPacketFrames
+  fastPacketFrames,
+  payloadLength
 } = require('./lib/performance-pgn')
+const { computeStartLine, encodeStartLine, START_LINE_KEYS } = require('./lib/start-line')
 var H5000_UNIQUE_NUMBER = 1731561
 var globalOptions = []
 const performancePGN = '%s,3,130824,%s,255,%s,7d,99'
@@ -53,7 +55,37 @@ module.exports = function (app) {
         title: "Source device id for B&G H5000 device emulation to use.",
         default: 14
       },
-      
+      startLine: {
+        type: 'object',
+        title: 'Start line (from signalk-racer: navigation.racing.startLinePort / startLineStb)',
+        description: 'When both line ends are set, add the B&G start line keys (ends, line bearing and bias, distances to the line and ends, race timer) to PGN 130824 so Zeus/Vulcan/Triton2 show the line as if an H5000 had pinged it.',
+        properties: {
+          enabled: {
+            type: 'boolean',
+            title: 'Send start line keys',
+            default: true
+          },
+          gpsFromBow: {
+            type: 'number',
+            title: 'GPS antenna distance from the bow (m). Distances are measured from the bow.',
+            default: 0
+          },
+          boatLength: {
+            type: 'number',
+            title: 'Boat length for the "boat lengths" keys (m). Leave empty to use design.length.overall.'
+          },
+          raceTimer: {
+            type: 'boolean',
+            title: 'Send race timer (key 117) from navigation.racing.timeToStart while the timer runs',
+            default: true
+          },
+          timeToBurn: {
+            type: 'boolean',
+            title: 'Send time to burn (key 409) from navigation.racing.timeToBurn',
+            default: true
+          }
+        }
+      }
     }
   }
 
@@ -679,6 +711,7 @@ module.exports = function (app) {
   // Last good values for keys that polar briefly nulls. Navico treats each
   // 130824 from a source as a full sample — omitting a key blanks the gauge.
   var lastPerformanceNumbers = Object.create(null)
+  var startLineTooLong = false
 
   function sendPerformance() {
     var performancePGN_2 = ""
@@ -738,12 +771,72 @@ module.exports = function (app) {
       }
     }
 
+    // Start line keys ride in the same full sample. 223 bytes is the
+    // fast-packet limit; past it, drop the line rather than the whole PGN.
+    var lineTail = startLineTail()
+    if (lineTail && payloadLength(performancePGN_2 + lineTail) > 223) {
+      if (!startLineTooLong) app.setPluginError('130824 with start line keys exceeds 223 bytes; start line not sent. Disable some values.')
+      startLineTooLong = true
+    } else {
+      performancePGN_2 += lineTail
+    }
+
     // app.debug ('%j', globalOptions)
     length = performancePGN_2.split(',').length + 1 // 7d,99 header plus data bytes
     if (length >= 4) {
       let msg = util.format(performancePGN + performancePGN_2, (new Date()).toISOString(), sourceAddress, String(length))
       sendN2k(msg)
     }
+  }
+
+  function selfValue (path) {
+    var v = app.getSelfPath(path)
+    return v && typeof v == 'object' && 'value' in v ? v.value : undefined
+  }
+
+  function startLineOptions () {
+    var o = globalOptions.startLine || {}
+    return {
+      enabled: o.enabled !== false,
+      gpsFromBow: Number(o.gpsFromBow) || 0,
+      boatLength: Number(o.boatLength) || undefined,
+      raceTimer: o.raceTimer !== false,
+      timeToBurn: o.timeToBurn !== false
+    }
+  }
+
+  // B&G start line keys for the full 130824, or '' with no line.
+  function startLineTail () {
+    var opts = startLineOptions()
+    if (!opts.enabled) return ''
+    var port = selfValue('navigation.racing.startLinePort')
+    var stb = selfValue('navigation.racing.startLineStb')
+    if (!port || !stb) return ''
+
+    var heading = selfValue('navigation.headingTrue')
+    if (typeof heading != 'number') heading = selfValue('navigation.courseOverGroundTrue')
+    var design = selfValue('design.length')
+    var timerRunning = !!selfValue('navigation.racing.startTime')
+
+    var values = computeStartLine({
+      port: port,
+      stb: stb,
+      position: selfValue('navigation.position'),
+      heading: heading,
+      gpsFromBow: opts.gpsFromBow,
+      windDirection: selfValue('environment.wind.directionTrue'),
+      boatLength: opts.boatLength || (design && design.overall),
+      timeToStart: opts.raceTimer && timerRunning ? selfValue('navigation.racing.timeToStart') : undefined,
+      timeToBurn: opts.timeToBurn ? selfValue('navigation.racing.timeToBurn') : undefined
+    })
+    if (!values) return ''
+
+    var enabled = new Set(Object.keys(START_LINE_KEYS))
+    // Key 305 can also be configured as a plain value; never send it twice.
+    if (valueConfig('biasAdvantage', supportedValues.biasAdvantage, globalOptions.biasAdvantage).enabled) {
+      enabled.delete('biasAdvantage')
+    }
+    return encodeStartLine(values, enabled)
   }
 
   function sendN2k (msg) {

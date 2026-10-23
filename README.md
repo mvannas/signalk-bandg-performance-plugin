@@ -160,3 +160,37 @@ One target-TWA value is six data bytes: `7d,99,53,20,b7,7a`. The fast-packet len
 | Remote 8–9 | | 246–247 | 2 | value × 100 | canboat Remote 7–8. There is no Remote 7 in this plugin. |
 
 Heel is sent on key 52, which canboat calls magnetic variation. Trim (pitch) is sent on key 155, which canboat calls attitude roll. Jacuzzi and pool are multiplied by 100 and not converted from Celsius to kelvin. Remote 1 is canboat’s Remote 0; the plugin’s Remote 0 (key 223) is not in the canboat list.
+
+## Start line
+
+When [signalk-racer](https://github.com/mvannas/signalk-racer) has both line ends in `navigation.racing.startLinePort` and `navigation.racing.startLineStb` (`{ latitude, longitude }`), the plugin adds the B&G start line keys to the same full 130824 sample. This is what an H5000 CPU sends after the line has been pinged, so a Zeus/Vulcan that leaves the line to the (emulated) H5000 can show it. When either end is cleared (`null`) the keys are dropped from the next sample.
+
+Settings (**Start line**): on/off (default on), GPS distance from the bow (distances are measured from the bow, moved along `navigation.headingTrue`, or COG if heading is missing), boat length for the boat-length keys (default `design.length.overall`; those keys are left out without a length), race timer on/off, time to burn on/off.
+
+| Key | Value | Source | Bytes | Encoding (canboat) |
+|---:|---|---|---:|---|
+| 276 / 277 | Port end lat / lon | `startLinePort` | 4 | signed, 1e-7° |
+| 278 / 279 | Starboard end lat / lon | `startLineStb` | 4 | signed, 1e-7° |
+| 272 | Line bearing, port → starboard, true | ends | 2 | signed, 0.0001 rad, wrapped to ±π |
+| 273 | Line bias angle | ends + `environment.wind.directionTrue` | 2 | signed, 0.0001 rad |
+| 305 | Bias advantage | line length × sin(bias) | 4 | unsigned, 0.01 m (magnitude) |
+| 280 | Bias advantage in boat lengths | | 2 | signed, 0.1 |
+| 152 | Distance to start line (nearest point on the segment) | `navigation.position` | 4 | signed, 0.01 m |
+| 301 | Distance behind start line (perpendicular to the extended line) | | 4 | signed, 0.01 m |
+| 274 / 275 | Distance to port / starboard end | | 4 | unsigned, 0.01 m |
+| 281 / 302 / 364 / 365 | Same distances in boat lengths | | 2 | signed, 0.1 |
+| 117 | Race timer | `navigation.racing.timeToStart` while `startTime` is set | 4 | signed, 0.001 s |
+| 409 | Time to burn | `navigation.racing.timeToBurn` | 4 | signed, 0.001 s |
+
+Key numbers, widths and resolutions come from canboat's `BANDG_KEY_VALUE`. The sign conventions are **assumptions, not yet checked against an H5000 capture**:
+
+- Distances to the line are positive on the pre-start side and negative over the line (OCS). The course side is taken as left of the port → starboard direction (pin on the left when facing upwind).
+- Bias is positive when the starboard (committee boat) end is upwind, the same sign as Racer's `navigation.racing.stbLineBias`.
+- The race timer counts down as a negative number (−120 000 ms = two minutes to go).
+- Keys 263/264 (Start Line Latitude/Longitude) and 411/412 (ping times) are not sent: their meaning is unclear.
+
+If a display shows a value with the wrong sign, that is the place to change (`lib/start-line.js`). Key 305 is not sent twice: when **Bias Advantage** is enabled as a plain value, its configured path wins.
+
+The plugin does not answer the Zeus ping command (PGN 130850). The line has to be set in Racer; the MFD then only displays it.
+
+The start line keys add up to about 90 bytes. If the whole 130824 would go over the 223-byte fast-packet limit, the line keys are left out and the plugin reports an error.
