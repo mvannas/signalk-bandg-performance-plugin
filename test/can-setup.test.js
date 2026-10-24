@@ -58,3 +58,22 @@ test('falls back to the socketcan module on older servers', () => {
   assert.equal(openCanChannel('can1', { requireFn, serverPaths: ['/server'] }).iface, 'can1')
   assert.throws(() => openCanChannel('can1', { requireFn, serverPaths: ['/elsewhere'] }), /no CAN socket module found/)
 })
+
+test('the server CanChannel gets a writeFrame that reports the native result', () => {
+  const written = []
+  class CanChannel { constructor () { this.writeFd = 7; this.stopped = false } }
+  const native = { writeCanFrame (fd, frame) { written.push([fd, frame]); return -105 } }
+  const requireFn = (id) => {
+    if (id === '/s/node_modules/@canboat/canboatjs/dist/canSocket.js') return { CanChannel }
+    if (id === '/s/node_modules/@canboat/canboatjs/build/Release/canSocket.node') return native
+    throw new Error(`Cannot find module '${id}'`)
+  }
+  requireFn.resolve = () => '/s/node_modules/@canboat/canboatjs/dist/index.js'
+  const channel = openCanChannel('can0', { requireFn, serverPaths: ['/s'] })
+  assert.equal(channel.writeFrame({ id: 0x19f01414, ext: true, data: Buffer.from([1, 2, 3]) }), -105)
+  const [fd, frame] = written[0]
+  assert.equal(fd, 7)
+  assert.equal(frame.readUInt32LE(0), (0x19f01414 | 0x80000000) >>> 0)
+  assert.equal(frame[4], 3)
+  assert.deepEqual([...frame.subarray(8, 11)], [1, 2, 3])
+})
