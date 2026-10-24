@@ -11,7 +11,7 @@ const {
   payloadLength
 } = require('./lib/performance-pgn')
 const { computeStartLine, encodeStartLine, encodeStartLineValue, START_LINE_KEYS } = require('./lib/start-line')
-const { parseTimerEvent, parseTimerFields, racerCommands, lengthToAdjust } = require('./lib/race-timer')
+const { parseTimerEvent, parseTimerDuration, parseN2k, racerCommands, lengthToAdjust } = require('./lib/race-timer')
 var H5000_UNIQUE_NUMBER = 1731561
 var globalOptions = []
 const performancePGN = '%s,3,130824,%s,255,%s,7d,99'
@@ -857,19 +857,26 @@ module.exports = function (app) {
     return tail
   }
 
-  // Race timer start/stop/sync/reset from the MFD (PGN 130850) → Racer's
-  // start clock (PUT navigation.racing.setStartTime). The command can
-  // arrive both raw (emulate) and decoded (N2KAnalyzerOut); one is enough.
+  // Race timer from the MFD → Racer's start clock (PUT
+  // navigation.racing.setStartTime): start/stop/sync/reset (PGN 130850) and
+  // the countdown length (PGN 130845). A command can arrive both raw
+  // (emulate) and decoded (N2KAnalyzerOut); one is enough.
   var lastTimerEvent = { key: '', at: 0 }
+  var mfdDuration
 
   function handleTimerEvent (event, src) {
     if (!event || !startLineOptions().timerFromMfd) return
-    var key = event.command + ':' + event.parameter2
+    var key = event.command + ':' + (event.seconds || event.parameter2)
     var now = Date.now()
     if (key === lastTimerEvent.key && now - lastTimerEvent.at < 1000) return
     lastTimerEvent = { key: key, at: now }
     app.debug('MFD race timer from %s: %j', src, event)
-    runRacerSteps(racerCommands(event))
+    if (event.command === 'duration') mfdDuration = event.seconds
+    var racer = {
+      running: !!selfValue('navigation.racing.startTime'),
+      timeToStart: selfValue('navigation.racing.timeToStart')
+    }
+    runRacerSteps(racerCommands(event, racer, mfdDuration))
   }
 
   function runRacerSteps (steps) {
@@ -1026,7 +1033,7 @@ module.exports = function (app) {
         },
         transmitPGNs: [59392, 59904, 60928, 126464, 126993, 126996, 126998, 65305,
           127250, 128259, 129283, 129284, 130306, 130824],
-        receivePGNs: [59904, 60928, 127250, 128259, 129283, 129284, 130306, 130850],
+        receivePGNs: [59904, 60928, 127250, 128259, 129283, 129284, 130306, 130845, 130850],
         debug: app.debug
       })
 
@@ -1041,8 +1048,9 @@ module.exports = function (app) {
       })
 
 	    h5000.messageCb = (msg) => {
-	      if (msg.pgn.pgn === 130850 && msg.pgn.src != h5000.address) {
-	        handleTimerEvent(parseTimerEvent(msg.data), msg.pgn.src)
+	      if (msg.pgn.src != h5000.address) {
+	        if (msg.pgn.pgn === 130850) handleTimerEvent(parseTimerEvent(msg.data), msg.pgn.src)
+	        if (msg.pgn.pgn === 130845) handleTimerEvent(parseTimerDuration(msg.data), msg.pgn.src)
 	      }
 	      if (duplicatePGNs.includes(msg.pgn.pgn) == true && msg.pgn.src != h5000.address) {
 	        // Resend from this plugin id
@@ -1070,7 +1078,7 @@ module.exports = function (app) {
     }
 
     var onAnalyzer = function (n2k) {
-      handleTimerEvent(parseTimerFields(n2k), n2k && n2k.src)
+      handleTimerEvent(parseN2k(n2k), n2k && n2k.src)
     }
     app.on('N2KAnalyzerOut', onAnalyzer)
     unsubscribes.push(() => app.removeListener('N2KAnalyzerOut', onAnalyzer))

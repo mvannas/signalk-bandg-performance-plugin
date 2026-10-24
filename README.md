@@ -249,17 +249,21 @@ The start line keys add up to about 90 bytes. If the whole 130824 would go over 
 
 ## Race timer from the plotter
 
-With **Race timer from the plotter** on (default), the plugin listens for the MFD's race timer commands, PGN 130850 *Simnet: Event Command: Timer* (canboat `simnetEventCommandTimer`, event type 23), and passes them to signalk-racer's start clock with `PUT navigation.racing.setStartTime`:
+With **Race timer from the plotter** on (default), the plugin listens for the MFD's race timer and passes it to signalk-racer's start clock with `PUT navigation.racing.setStartTime`. Checked against a recording from a Zeus (src 15, 2026-10-24).
+
+Commands: PGN 130850 *Simnet: Event Command: Timer* (canboat `simnetEventCommandTimer`, event type 23). The Zeus sends them broadcast, address `ff`, group 1, all parameters `ff`:
 
 | MFD event | Code | Racer |
 |---|---:|---|
-| Race Timer Start | 61 | `start` (after setting the length, if one came with the command) |
+| Race Timer Start | 61 | `start`. A stopped countdown resumes; at 0 a new one starts from the MFD length |
 | Race Timer Stop | 62 | `stop` (needs a Racer with the `stop` command) |
 | Race Timer Sync | 63 | `sync` (to the nearest minute) |
-| Race Timer Reset | 64 | `reset`, then the length, if one came with the command |
+| Race Timer Reset | 64 | `reset`, then the MFD length |
 
-In emulate mode the raw frames from the bus are read; otherwise the server's decoded `N2KAnalyzerOut` is used. The same command seen twice within a second is handled once.
+Length: PGN 130845 *Simnet: Key Value*, key 16903 *Race timer duration*, operation 1 (set). The value is in whole minutes (canboat: 60 s resolution); 50 minutes set on the Zeus was sent as 50. A new length is applied to Racer only while its clock is not running (`adjust` to the new length), and is remembered for later resets.
+
+Raw bytes are used whenever they are available: in emulate mode the frames from the bus, otherwise `rawData` or the candump `input` lines of `N2KAnalyzerOut`. Signal K's canboatjs may decode 130850 as *Simnet: AP command* without the event fields, so decoded fields are only a fallback. The same command seen twice within a second is handled once.
 
 Racer then runs the clock, and the plugin sends it back to the displays as key 117 while it runs (`navigation.racing.startTime` set), with or without a start line.
 
-**Assumption:** canboat does not say where the countdown length travels. The plugin takes Parameter 2 as seconds when it is 1–3600 and turns it into a Racer `adjust`. If the length you set on the plotter does not reach Racer, enable debug for this plugin: every received timer command is logged with its raw parameters (`MFD race timer from …`).
+Every received command is logged at debug level (`MFD race timer from …`).
