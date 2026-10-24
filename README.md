@@ -132,14 +132,14 @@ A real CPU also claims several virtual devices with their own addresses (`Hercul
 
 ### Interface and errors
 
-The CAN interface is **Candevice**, or else the first enabled Signal K NMEA 2000 socketcan connection (Signal K 2.x `canbus-canboatjs` with its `interface`, or a 1.x `providers/canbus`), or else `can0`. `socketcan` is loaded from the plugin, or else from the Signal K server's own install, because the plugin's optional copy usually does not build under `~/.signalk`.
+The CAN interface is **Candevice**, or else the first enabled Signal K NMEA 2000 socketcan connection (Signal K 2.x `canbus-canboatjs` with its `interface`, or a 1.x `providers/canbus`), or else `can0`. The CAN socket comes from the Signal K server's own canboatjs. canboatjs 3 (Signal K 2.x) has its own native `CanChannel` and no longer uses the `socketcan` module, so the plugin uses that copy, which is already built on the boat. On older servers it falls back to the `socketcan` module.
 
 The plugin status says what went wrong instead of staying silent:
 
 | Status | Meaning |
 |---|---|
 | `H5000 Hercules on can0 at address 20` | Running. |
-| `H5000 emulation: cannot open can0 (socketcan not found …)` | The native module is missing. |
+| `H5000 emulation: cannot open can0 (no CAN socket module found …)` | Neither the server's canboatjs `CanChannel` nor `socketcan` could be loaded. |
 | `H5000 emulation: no CAN frames received on can0 in 5 s` | Wrong interface, or it is down. |
 | `H5000 emulation on can0: <error>` | Sending failed (for example `Network is down`). |
 
