@@ -794,10 +794,36 @@ module.exports = function (app) {
 
     // app.debug ('%j', globalOptions)
     length = performancePGN_2.split(',').length + 1 // 7d,99 header plus data bytes
+    showStatus(countKeys(performancePGN_2))
     if (length >= 4) {
       let msg = util.format(performancePGN + performancePGN_2, (new Date()).toISOString(), sourceAddress, String(length))
       sendN2k(msg)
     }
+  }
+
+  // Plugin status: where the emulator is and how full the 130824 sample is,
+  // so a sample that never goes out (no Signal K data) is visible.
+  var statusBase = ''
+  var statusKeys = -1
+
+  function showStatus (keys) {
+    if (typeof keys == 'number') {
+      if (keys === statusKeys) return
+      statusKeys = keys
+    }
+    if (!statusBase) return
+    var tail = statusKeys > 0
+      ? `, 130824 with ${statusKeys} values`
+      : ', no 130824 (no data for the enabled values)'
+    app.setPluginStatus(statusBase + tail)
+  }
+
+  // Number of key/value pairs in a ',k1,k2,v…' tail (length nibble of k2).
+  function countKeys (tail) {
+    var bytes = tail.split(',').slice(1)
+    var keys = 0
+    for (var i = 0; i + 1 < bytes.length; i += 2 + (parseInt(bytes[i + 1], 16) >> 4)) keys++
+    return keys
   }
 
   function selfValue (path) {
@@ -1041,9 +1067,11 @@ module.exports = function (app) {
         if (address === 254) {
           app.setPluginError(`H5000 emulation: no free address on ${canDevice}`)
         } else if (address !== sourceAddress) {
-          app.setPluginStatus(`H5000 Hercules on ${canDevice} at address ${address} (preferred ${sourceAddress} is in use)`)
+          statusBase = `H5000 Hercules on ${canDevice} at address ${address} (preferred ${sourceAddress} is in use)`
+          showStatus()
         } else {
-          app.setPluginStatus(`H5000 Hercules on ${canDevice} at address ${address}`)
+          statusBase = `H5000 Hercules on ${canDevice} at address ${address}`
+          showStatus()
         }
       })
 
