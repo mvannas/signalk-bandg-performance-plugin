@@ -6,9 +6,66 @@ const { EventEmitter } = require('node:events')
 const {
   parseTimerEvent,
   parseTimerFields,
+  parseTimerDuration,
+  parseN2k,
   racerCommands,
   lengthToAdjust
 } = require('../lib/race-timer')
+
+// Recorded on the boat 2026-10-24 (Zeus at src 15), as the server's
+// N2KAnalyzerOut gave them: its canboatjs decodes 130850 as an AP command.
+const recordedStart = {
+  pgn: 130850, src: 15, dst: 255,
+  input: ['can0  09ff220f   [8]  00 0c 41 9f ff ff 01 17', 'can0  09ff220f   [8]  01 3d 00 ff ff ff ff ff'],
+  rawData: [65, 159, 255, 255, 1, 23, 61, 0, 255, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0],
+  fields: { manufacturerCode: 'Simrad', industryCode: 'Marine Industry', proprietaryId: 'Autopilot', reserved9: 0, reserved15: 0 }
+}
+const recordedStop = {
+  pgn: 130850, src: 15, dst: 255,
+  input: ['can0  09ff220f   [8]  20 0c 41 9f ff ff 01 17', 'can0  09ff220f   [8]  21 3e 00 ff ff ff ff ff'],
+  rawData: [65, 159, 255, 255, 1, 23, 62, 0, 255, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0],
+  fields: { manufacturerCode: 'Simrad', industryCode: 'Marine Industry', proprietaryId: 'Autopilot' }
+}
+const recordedDuration = {
+  pgn: 130845, src: 15, dst: 255,
+  input: ['can0  0dff1d0f   [8]  40 0e 41 9f ff ff ff ff', 'can0  0dff1d0f   [8]  41 07 42 00 01 32 00 00', 'can0  0dff1d0f   [8]  42 00 ff ff ff ff ff ff'],
+  rawData: [65, 159, 255, 255, 255, 255, 7, 66, 0, 1, 50, 0, 0, 0, 255, 255, 255, 255, 255, 255, 0],
+  fields: { manufacturerCode: 'Simrad', industryCode: 'Marine Industry', key: 16903, spare9: 0, minlength: 1 }
+}
+
+test('recorded Zeus start, stop and duration', () => {
+  assert.equal(parseN2k(recordedStart).command, 'start')
+  assert.equal(parseN2k(recordedStart).seconds, undefined)
+  assert.equal(parseN2k(recordedStop).command, 'stop')
+  assert.deepEqual(parseN2k(recordedDuration), { command: 'duration', seconds: 300, value: 50 })
+})
+
+test('recorded messages also parse from the candump lines alone', () => {
+  const noRaw = m => Object.assign({}, m, { rawData: undefined })
+  assert.equal(parseN2k(noRaw(recordedStart)).command, 'start')
+  assert.equal(parseN2k(noRaw(recordedStop)).command, 'stop')
+  assert.equal(parseN2k(noRaw(recordedDuration)).seconds, 300)
+})
+
+test('130845 other keys and reads are ignored', () => {
+  const read = recordedDuration.rawData.slice()
+  read[9] = 0
+  assert.equal(parseTimerDuration(read), null)
+  const other = recordedDuration.rawData.slice()
+  other[6] = 0x08
+  assert.equal(parseTimerDuration(other), null)
+})
+
+test('duration and the last known length in Racer steps', () => {
+  const d = { command: 'duration', seconds: 300 }
+  assert.deepEqual(racerCommands(d, { running: false, timeToStart: 120 }), [{ command: 'length', seconds: 300 }])
+  assert.deepEqual(racerCommands(d, { running: true, timeToStart: 120 }), [])
+  // Reset from the MFD carries no length: use the last one it set.
+  assert.deepEqual(racerCommands({ command: 'reset' }, {}, 300), [{ command: 'reset' }, { command: 'length', seconds: 300 }])
+  // Start after a stop resumes; start after the gun begins a new countdown.
+  assert.deepEqual(racerCommands({ command: 'start' }, { timeToStart: 95 }, 300), [{ command: 'start' }])
+  assert.deepEqual(racerCommands({ command: 'start' }, { timeToStart: 0 }, 300), [{ command: 'length', seconds: 300 }, { command: 'start' }])
+})
 
 // 41,9f = Navico; address 0; group 1; event type 23; event LE16; p1; p2 LE16; p3
 function frame (event, p2 = 0xffff) {
@@ -88,6 +145,25 @@ test('plotter reset with a length, then start, reaches Racer once each', async (
     { path: 'navigation.racing.setStartTime', value: { command: 'reset' } },
     { path: 'navigation.racing.setStartTime', value: { command: 'adjust', delta: -60 } },
     { path: 'navigation.racing.setStartTime', value: { command: 'start' } }
+  ])
+})
+
+test('recorded Zeus messages reach Racer through N2KAnalyzerOut', async () => {
+  const self = { 'navigation.racing.timeToStart': { value: 120 } }
+  const app = mockApp(self)
+  const plugin = require('../index.js')(app)
+  plugin.start({}, () => {})
+  app.emit('N2KAnalyzerOut', recordedStart)
+  await new Promise(resolve => setTimeout(resolve, 20))
+  app.emit('N2KAnalyzerOut', recordedStop)
+  await new Promise(resolve => setTimeout(resolve, 20))
+  app.emit('N2KAnalyzerOut', recordedDuration)
+  await new Promise(resolve => setTimeout(resolve, 20))
+  plugin.stop()
+  assert.deepEqual(app.puts.map(p => p.value), [
+    { command: 'start' },
+    { command: 'stop' },
+    { command: 'adjust', delta: 180 }
   ])
 })
 
