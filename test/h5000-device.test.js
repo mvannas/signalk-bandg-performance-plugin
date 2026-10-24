@@ -255,3 +255,47 @@ test('a send error is reported once, not per frame', () => {
   device.sendFrame(6, 60928, 255, device.name)
   assert.deepEqual(errors, ['Network is down'])
 })
+
+test('a full kernel queue holds frames back instead of dropping them', () => {
+  mock.timers.enable({ apis: ['setTimeout', 'setInterval'] })
+  try {
+    const channel = fakeChannel()
+    let room = 3
+    channel.writeFrame = (frame) => {
+      if (room === 0) return -105 // ENOBUFS
+      room--
+      channel.send(frame)
+      return 16
+    }
+    const device = startDevice(channel)
+    mock.timers.tick(1000)
+    mock.timers.tick(250)
+    // 59904 + 60928 + first frame of 126996 made it; the rest waits.
+    assert.equal(channel.take().length, 3)
+    assert.ok(device.txQueue.length > 19)
+    room = 100
+    mock.timers.tick(5)
+    const rest = channel.take()
+    assert.equal(rest.filter(f => f.pgn === 126996).length, 19)
+    assert.equal(rest.filter(f => f.pgn === 126993).length, 1)
+    assert.equal(device.txQueue.length, 0)
+    device.stop()
+  } finally {
+    mock.timers.reset()
+  }
+})
+
+test('does not answer claim requests before it has an address', () => {
+  mock.timers.enable({ apis: ['setTimeout', 'setInterval'] })
+  try {
+    const channel = fakeChannel()
+    const device = startDevice(channel)
+    channel.take()
+    channel.receive(6, 59904, 14, 254, [0x00, 0xee, 0x00])
+    channel.receive(6, 59904, 14, 255, [0x00, 0xee, 0x00])
+    assert.equal(channel.take().length, 0)
+    device.stop()
+  } finally {
+    mock.timers.reset()
+  }
+})
