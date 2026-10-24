@@ -2,7 +2,7 @@
 
 const { test } = require('node:test')
 const assert = require('node:assert/strict')
-const { detectCanDevice, loadSocketcan } = require('../lib/can-setup')
+const { detectCanDevice, openCanChannel } = require('../lib/can-setup')
 
 test('finds the interface of a Signal K 2.x canboatjs provider', () => {
   const settings = {
@@ -29,16 +29,32 @@ test('no providers is not an error', () => {
   assert.equal(detectCanDevice({}), undefined)
 })
 
-test('socketcan falls back to the server tree', () => {
-  const fake = { createRawChannel () {} }
+test('uses the CanChannel of the server\'s canboatjs 3', () => {
+  class CanChannel { constructor (iface) { this.iface = iface } }
+  const requireFn = (id) => {
+    if (id === '/server/node_modules/@canboat/canboatjs/dist/canSocket.js') return { CanChannel }
+    throw new Error(`Cannot find module '${id}'`)
+  }
+  requireFn.resolve = (id, opts) => {
+    if (id === '@canboat/canboatjs' && opts.paths[0] === '/server') return '/server/node_modules/@canboat/canboatjs/dist/index.js'
+    throw new Error(`Cannot find module '${id}'`)
+  }
+  const channel = openCanChannel('can0', { requireFn, serverPaths: ['/plugin', '/server'] })
+  assert.ok(channel instanceof CanChannel)
+  assert.equal(channel.iface, 'can0')
+})
+
+test('falls back to the socketcan module on older servers', () => {
+  const fake = { createRawChannel (iface) { return { iface } } }
   const requireFn = (id) => {
     if (id === '/server/node_modules/socketcan/index.js') return fake
     throw new Error(`Cannot find module '${id}'`)
   }
   requireFn.resolve = (id, opts) => {
-    if (id === 'socketcan' && opts && opts.paths[0] === '/server') return '/server/node_modules/socketcan/index.js'
+    if (id === '@canboat/canboatjs') return '/server/node_modules/@canboat/canboatjs/lib/index.js'
+    if (id === 'socketcan' && opts.paths[0] === '/server') return '/server/node_modules/socketcan/index.js'
     throw new Error(`Cannot find module '${id}'`)
   }
-  assert.equal(loadSocketcan(requireFn, '/server'), fake)
-  assert.throws(() => loadSocketcan(requireFn, '/elsewhere'), /socketcan not found/)
+  assert.equal(openCanChannel('can1', { requireFn, serverPaths: ['/server'] }).iface, 'can1')
+  assert.throws(() => openCanChannel('can1', { requireFn, serverPaths: ['/elsewhere'] }), /no CAN socket module found/)
 })

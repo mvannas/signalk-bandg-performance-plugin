@@ -1,7 +1,7 @@
 const util = require('util')
 const _ = require('lodash')
 const { H5000Device } = require('./lib/h5000-device')
-const { detectCanDevice, loadSocketcan } = require('./lib/can-setup')
+const { detectCanDevice, openCanChannel, defaultServerPaths } = require('./lib/can-setup')
 const {
   encodeValue,
   valueConfig,
@@ -1017,7 +1017,7 @@ module.exports = function (app) {
 
       var channel
       try {
-        channel = loadSocketcan().createRawChannel(canDevice)
+        channel = openCanChannel(canDevice, { serverPaths: defaultServerPaths(app.config && app.config.appPath) })
       } catch (err) {
         app.setPluginError(`H5000 emulation: cannot open ${canDevice} (${err.message})`)
         return
