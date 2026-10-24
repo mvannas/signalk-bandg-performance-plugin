@@ -92,7 +92,7 @@ The Laylines **menu page** is a separate gate. `OnCheckModesTimer` keeps `eSyste
 
 The keepalive payload is **not** the device NAME. Slot 14 is filled when this device is chosen as the source for Target TWA (data id 227) or target boat speed (233). On a blank Triton2, open the data-source UI once and pick the emulated H5000 for Target TWA; after that the 1 Hz keepalive keeps the menu open.
 
-Emulate mode already claims product code 246 / `H5000 CPU`, sends 65305 every second, and rebroadcasts 130306 (and related PGNs) from the emulated address. Enable emulate on canbus for the Laylines screen; enable Target TWA + Target boat Speed (defaults) so the geometry has data.
+Emulate mode presents the plugin as an H5000 CPU (see [H5000 identity on the bus](#h5000-identity-on-the-bus)), sends 65305 every second, and rebroadcasts 130306 (and related PGNs) from the emulated address. Enable emulate on canbus for the Laylines screen; enable Target TWA + Target boat Speed (defaults) so the geometry has data.
 
 Triton field code 2 for target TWA is an unsigned 16-bit × 0.0001 rad conversion. Prefer a positive target angle (0–π). A negative two’s-complement count is read as a large positive angle on Triton2 even though Zeus treats the same bytes as signed. Optimum Wind Angle (key 53) uses the same unsigned decode on Triton2: a negative count falls outside the gauge range and shows Invalid/`---`, so the plugin sends `abs(optimumWindAngle)` (and never wire 0).
 
@@ -108,6 +108,58 @@ Worked bytes, H5000 scale:
 | `performance.velocityMadeGood` = 3.77 m/s | `7f,20` | 377 | `79,01` |
 
 One target-TWA value is six data bytes: `7d,99,53,20,b7,7a`. The fast-packet length byte is 6. The CAN frame is `40,06,7d,99,53,20,b7,7a` (sequence `0x40`, then the six payload bytes).
+
+## H5000 identity on the bus
+
+With emulate on, the plugin opens its own socketcan channel and is one NMEA 2000 device that looks like the main device of a real H5000 Hercules CPU (firmware 4.0-5.0.160, canboat samples `live.all` and `ap48-tack.all`, source 38). Every byte below was checked against that capture.
+
+| PGN | What is sent | Real CPU |
+|---|---|---|
+| 60928 ISO Address Claim | B&G (381), device function 190, device class 60 Navigation, industry Marine, arbitrary address capable. Unique number 1731561. | `27,07,bd,2f,00,be,78,c0` |
+| 126996 Product Information | NMEA 2000 version 2100, product code 25506, Model ID `Hercules ` (or `Performance `), software `4.0-5.0.160`, empty model version, serial `1731561`, certification level 2, LEN 1. Strings padded with `ff`, serial with spaces. Sent after the claim and on request. | 134 bytes, same layout |
+| 126998 Configuration Information | Three empty strings, on request. | `02,01,02,01,02,01` |
+| 126993 Heartbeat | Every 60 s, interval 60000 ms and a sequence counter. | `60,ea,<seq>,ff,ff,ff,ff,ff` |
+| 126464 PGN List | Transmit and receive lists, on request. | not in the capture |
+| 59392 ISO Acknowledgement | NAK for any other PGN requested from this address directly. | not in the capture |
+
+Address claim follows ISO 11783-5. At start the plugin asks every device for its claim, waits one second and claims **Source address** if nobody holds it, otherwise the next free address. An address that was heard sending anything in that second also counts as taken, since some devices never answer the request. It sends nothing else for 250 ms after the claim. If another device later claims the same address, the lower NAME keeps it and the other moves on. The plugin status shows the address in use. 65305, 130824, 130306 and the rebroadcast PGNs always go out from that address.
+
+Changing the manufacturer from Navico to B&G changes the device NAME. A Zeus or Triton2 that had the old emulator chosen as a data source must have it chosen again once (Target TWA, target boat speed, laylines).
+
+Earlier versions used canboatjs SimpleCan. It claimed as Navico "Internal Environment" with product code 246, sent no heartbeat or 126998, compared Signal K 2.x camelCase claims as if they were canboatjs 1.x field names, and did not close its channel on plugin restart, so every settings save added another device to the bus.
+
+A real CPU also claims several virtual devices with their own addresses (`Hercules Boat Speed 1`, `Hercules Analog 1`, `Hercules NMEA0183 1`, `Hercules Barometer` and so on, all product code 25506). The plugin does not emulate those. The main device is the one that sends 130824 and 130306.
+
+### Interface and errors
+
+The CAN interface is **Candevice**, or else the first enabled Signal K NMEA 2000 socketcan connection (Signal K 2.x `canbus-canboatjs` with its `interface`, or a 1.x `providers/canbus`), or else `can0`. `socketcan` is loaded from the plugin, or else from the Signal K server's own install, because the plugin's optional copy usually does not build under `~/.signalk`.
+
+The plugin status says what went wrong instead of staying silent:
+
+| Status | Meaning |
+|---|---|
+| `H5000 Hercules on can0 at address 20` | Running. |
+| `H5000 emulation: cannot open can0 (socketcan not found …)` | The native module is missing. |
+| `H5000 emulation: no CAN frames received on can0 in 5 s` | Wrong interface, or it is down. |
+| `H5000 emulation on can0: <error>` | Sending failed (for example `Network is down`). |
+
+### Checking it on the boat
+
+With emulate on and the plugin restarted, the status line names the address, for example `H5000 on can0 at address 15 (preferred 14 is in use)`. Call it `NN` in hex below (15 = `0F`).
+
+```sh
+# Claim, product info and heartbeat from the emulator (60928, 126996, 126993)
+candump -tA can0,00EEFF00:00FFFF00,00F01400:00FFFF00,00F01100:00FFFF00
+
+# Everything the emulator sends; replace NN with the address in hex
+candump -tA can0,000000NN:000000FF
+
+# Ask the emulator for its product information and config info (needs can-utils)
+cansend can0 18EANNFE#14F001
+cansend can0 18EANNFE#16F001
+```
+
+The claim from the emulator must read `e9,6b,ba,2f,00,be,78,c0`. On the Zeus, **Settings → Network → Device list** should show a B&G `Hercules` at that address. Then pick it as the source for Target TWA and target boat speed under **Network → Sources**, and test the start line ping.
 
 ## Keys this plugin sends
 

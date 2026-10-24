@@ -1,14 +1,13 @@
 const util = require('util')
 const _ = require('lodash')
-var n2kCamelCompat = require('./lib/n2k-camel-compat')
+const { H5000Device } = require('./lib/h5000-device')
+const { detectCanDevice, loadSocketcan } = require('./lib/can-setup')
 const {
   encodeValue,
   valueConfig,
   encodeTrueWind130306,
   encodeTrueWindDirection130306,
   encodeOptimumWindAngle,
-  canIdForPgn,
-  fastPacketFrames,
   payloadLength
 } = require('./lib/performance-pgn')
 const { computeStartLine, encodeStartLine, encodeStartLineValue, START_LINE_KEYS } = require('./lib/start-line')
@@ -28,7 +27,7 @@ module.exports = function (app) {
   var unsubscribes = []
   var timers = []
   var sourceAddress = 1
-  var simpleCan
+  var h5000
   var duplicatePGNs = [130306, 128259, 129284,     127250,  129283]
       //               Wind  , STW   , navigation, heading, XTE
 
@@ -53,8 +52,14 @@ module.exports = function (app) {
       },
       sourceAddress: {
         type: "number",
-        title: "Source device id for B&G H5000 device emulation to use.",
+        title: "Preferred source address for the emulated H5000. If another device already holds it, the next free address is claimed (see plugin status).",
         default: 14
+      },
+      h5000Level: {
+        type: 'string',
+        title: 'H5000 CPU level shown to the plotter (Model ID in product information)',
+        enum: ['Hercules', 'Performance'],
+        default: 'Hercules'
       },
       startLine: {
         type: 'object',
@@ -912,12 +917,12 @@ module.exports = function (app) {
   function sendN2k (msg) {
     // app.debug('Msg: %s', msg)
     if (globalOptions.emulate == true) {
-      // 130824 is a fast packet. simpleCan sends a bare frame when the
-      // payload is 8 bytes or fewer, which a Zeus will not reassemble.
+      // 130824 is a fast packet even at 8 bytes or fewer; a bare frame is
+      // not reassembled by a Zeus.
       if (msg.split(',')[2] === '130824') {
         sendFast130824(msg)
-      } else {
-        simpleCan.sendPGN(msg)
+      } else if (h5000) {
+        h5000.sendPGN(msg)
       }
     } else {
       app.emit('nmea2000out', msg)
@@ -925,16 +930,13 @@ module.exports = function (app) {
   }
 
   function sendFast130824 (msg) {
-    if (!simpleCan || !simpleCan.candevice || !simpleCan.candevice.cansend || !simpleCan.channel) {
+    if (!h5000 || !h5000.cansend) {
       return
     }
     const parts = msg.split(',')
     const len = Number(parts[5])
     const payload = Buffer.from(parts.slice(6, 6 + len).map(h => parseInt(h, 16)))
-    const canId = canIdForPgn(3, 130824, simpleCan.candevice.address)
-    for (const frame of fastPacketFrames(payload)) {
-      simpleCan.channel.send({ id: canId, ext: true, data: frame })
-    }
+    h5000.sendFast(3, 130824, payload)
   }
 
   function schemaEntry (key, name, defaultPath, enabledDefault) {
@@ -999,89 +1001,80 @@ module.exports = function (app) {
     app.debug('Options: %s', JSON.stringify(globalOptions))
 
     if (globalOptions.emulate == true) {
-      const SimpleCan = require('@canboat/canboatjs').SimpleCan
-      app.debug('Using device id: %d', options.sourceAddress)
-      sourceAddress = options.sourceAddress || 14
+      app.debug('Preferred device address: %d', options.sourceAddress)
+      sourceAddress = Number.isInteger(options.sourceAddress) ? options.sourceAddress : 14
 
-      const canboatjs = require('@canboat/canboatjs')
-      const Parser = require('@canboat/canboatjs').FromPgn
-      var parser = new canboatjs.FromPgn()
-
-      var deviceAddress
       var canDevice
 
-	    if (typeof options.candevice != 'undefined' && options.candevice != "") {
-	      canDevice = options.candevice
-	      app.debug('Using configured canDevice: %s', canDevice)
-	    } else {
-	      // app.debug('%j', app.config.settings.pipedProviders)
-	      app.debug('Trying to detect canDevice')
-	      app.config.settings.pipedProviders.forEach(provider => {
-	        if (provider.enabled == true) {
-	          provider.pipeElements.forEach(element => {
-	            if (element.type == 'providers/canbus' && typeof deviceAddress == 'undefined') {
-	              app.debug('Found provider/canbus')
-	              if (typeof element.options.canDevice != 'undefined') {
-		              app.debug('element.options.canDevice: %s', element.options.canDevice)
-	                canDevice = element.options.canDevice
-	              }
-	            }
-	          })
-	        }
-	      })
+      if (typeof options.candevice != 'undefined' && options.candevice != "") {
+        canDevice = options.candevice
+        app.debug('Using configured canDevice: %s', canDevice)
+      } else {
+        canDevice = detectCanDevice(app.config && app.config.settings)
+        app.debug('Detected canDevice: %s', canDevice)
+      }
+      canDevice = canDevice || 'can0'
+
+      var channel
+      try {
+        channel = loadSocketcan().createRawChannel(canDevice)
+      } catch (err) {
+        app.setPluginError(`H5000 emulation: cannot open ${canDevice} (${err.message})`)
+        return
       }
 
-	    simpleCan = new SimpleCan({
-	      app,
-	      canDevice: canDevice,
-	      preferredAddress: sourceAddress,
-	      transmitPGNs: [ 126996 ],
-	      addressClaim: {
-	        'Unique Number': H5000_UNIQUE_NUMBER,
-	        'Manufacturer Code': 'Navico',
-	        'Device Function': 190,
-	        'Device Class': 'Internal Environment',
-	        'Device Instance Lower': 0,
-	        'Device Instance Upper': 0,
-	        'System Instance': 0,
-	        'Industry Group': 'Marine'
-	      },
-	      productInfo: {
-	        'NMEA 2000 Version': 2100,
-	        'Product Code': 246,
-	        'Model ID': 'H5000 CPU',
-	        'Software Version Code': '2.0.45.0.29',
-	        'Model Version': '',
-	        'Model Serial Code': '005469',
-	        'Certification Level': 2,
-	        'Load Equivalency': 1
-	      }
+      h5000 = new H5000Device({
+        channel: channel,
+        preferredAddress: sourceAddress,
+        name: { uniqueNumber: H5000_UNIQUE_NUMBER },
+        productInfo: {
+          modelId: (options.h5000Level || 'Hercules') + ' ',
+          serialCode: String(H5000_UNIQUE_NUMBER)
+        },
+        transmitPGNs: [59392, 59904, 60928, 126464, 126993, 126996, 126998, 65305,
+          127250, 128259, 129283, 129284, 130306, 130824],
+        receivePGNs: [59904, 60928, 127250, 128259, 129283, 129284, 130306, 130845, 130850],
+        debug: app.debug
       })
 
-      if (globalOptions.emulate == true) {
-	      simpleCan.messageCb = (msg) => {
-	        if (msg.pgn.src != simpleCan.candevice.address) {
-	          if (msg.pgn.pgn === 130850) handleTimerEvent(parseTimerEvent(msg.data), msg.pgn.src)
-	          if (msg.pgn.pgn === 130845) handleTimerEvent(parseTimerDuration(msg.data), msg.pgn.src)
-	        }
-	        if (duplicatePGNs.includes(msg.pgn.pgn) == true && msg.pgn.src != simpleCan.candevice.address) {
-	          // app.debug(msg)
-	          // Resend from this plugin id
-	          let PGN = "%s,%s,%s,%s,255,%s," + hex(msg.data)
-	          let newMsg = util.format(PGN, (new Date()).toISOString(), msg.pgn.prio, msg.pgn.pgn, simpleCan.candevice.address, msg.length)
-	          // app.debug(newMsg)
-	          simpleCan.sendPGN(newMsg)
-	        }
-	      }
-      }
-
-      app.prependListener('N2KAnalyzerOut', function (n2k) {
-        n2kCamelCompat(n2k, H5000_UNIQUE_NUMBER)
+      h5000.on('address', (address) => {
+        if (address === 254) {
+          app.setPluginError(`H5000 emulation: no free address on ${canDevice}`)
+        } else if (address !== sourceAddress) {
+          app.setPluginStatus(`H5000 Hercules on ${canDevice} at address ${address} (preferred ${sourceAddress} is in use)`)
+        } else {
+          app.setPluginStatus(`H5000 Hercules on ${canDevice} at address ${address}`)
+        }
       })
-      simpleCan.start()
-      app.setPluginStatus(`Connected to ${canDevice}`)
-      app.debug('simpleCan.candevice.address: %j', simpleCan.candevice.address)
-      deviceAddress = simpleCan.candevice.address
+
+	    h5000.messageCb = (msg) => {
+	      if (msg.pgn.src != h5000.address) {
+	        if (msg.pgn.pgn === 130850) handleTimerEvent(parseTimerEvent(msg.data), msg.pgn.src)
+	        if (msg.pgn.pgn === 130845) handleTimerEvent(parseTimerDuration(msg.data), msg.pgn.src)
+	      }
+	      if (duplicatePGNs.includes(msg.pgn.pgn) == true && msg.pgn.src != h5000.address) {
+	        // Resend from this plugin id
+	        let PGN = "%s,%s,%s,%s,255,%s," + hex(msg.data)
+	        let newMsg = util.format(PGN, (new Date()).toISOString(), msg.pgn.prio, msg.pgn.pgn, h5000.address, msg.length)
+	        h5000.sendPGN(newMsg)
+	      }
+	    }
+
+      h5000.on('error', (err) => {
+        app.setPluginError(`H5000 emulation on ${canDevice}: ${err.message}`)
+      })
+
+      h5000.start()
+      app.setPluginStatus(`Claiming an address on ${canDevice}`)
+
+      // Signal K's own canbus provider reads the same bus, so silence here
+      // means the wrong interface (or the interface is down).
+      var emulator = h5000
+      timers.push(setTimeout(() => {
+        if (h5000 === emulator && emulator.framesReceived === 0) {
+          app.setPluginError(`H5000 emulation: no CAN frames received on ${canDevice} in 5 s. Check "Candevice" (ip link show).`)
+        }
+      }, 5000))
     }
 
     var onAnalyzer = function (n2k) {
@@ -1119,6 +1112,11 @@ module.exports = function (app) {
     app.debug('Plugin stopped')
     unsubscribes.forEach(f => f())
     unsubscribes = []
+    // A restart (every settings save) must not leave the old device on the bus.
+    if (h5000) {
+      h5000.stop()
+      h5000 = undefined
+    }
     timers.forEach(timer => {
       clearInterval(timer)
     }) 
