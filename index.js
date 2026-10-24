@@ -1,6 +1,7 @@
 const util = require('util')
 const _ = require('lodash')
 const { H5000Device } = require('./lib/h5000-device')
+const { detectCanDevice, loadSocketcan } = require('./lib/can-setup')
 const {
   encodeValue,
   valueConfig,
@@ -998,24 +999,12 @@ module.exports = function (app) {
 
       var canDevice
 
-	    if (typeof options.candevice != 'undefined' && options.candevice != "") {
-	      canDevice = options.candevice
-	      app.debug('Using configured canDevice: %s', canDevice)
-	    } else {
-	      app.debug('Trying to detect canDevice')
-	      app.config.settings.pipedProviders.forEach(provider => {
-	        if (provider.enabled == true) {
-	          provider.pipeElements.forEach(element => {
-	            if (element.type == 'providers/canbus' && typeof canDevice == 'undefined') {
-	              app.debug('Found provider/canbus')
-	              if (typeof element.options.canDevice != 'undefined') {
-		              app.debug('element.options.canDevice: %s', element.options.canDevice)
-	                canDevice = element.options.canDevice
-	              }
-	            }
-	          })
-	        }
-	      })
+      if (typeof options.candevice != 'undefined' && options.candevice != "") {
+        canDevice = options.candevice
+        app.debug('Using configured canDevice: %s', canDevice)
+      } else {
+        canDevice = detectCanDevice(app.config && app.config.settings)
+        app.debug('Detected canDevice: %s', canDevice)
       }
       canDevice = canDevice || 'can0'
 
@@ -1045,9 +1034,9 @@ module.exports = function (app) {
         if (address === 254) {
           app.setPluginError(`H5000 emulation: no free address on ${canDevice}`)
         } else if (address !== sourceAddress) {
-          app.setPluginStatus(`H5000 on ${canDevice} at address ${address} (preferred ${sourceAddress} is in use)`)
+          app.setPluginStatus(`H5000 Hercules on ${canDevice} at address ${address} (preferred ${sourceAddress} is in use)`)
         } else {
-          app.setPluginStatus(`H5000 on ${canDevice} at address ${address}`)
+          app.setPluginStatus(`H5000 Hercules on ${canDevice} at address ${address}`)
         }
       })
 
@@ -1063,8 +1052,21 @@ module.exports = function (app) {
 	      }
 	    }
 
+      h5000.on('error', (err) => {
+        app.setPluginError(`H5000 emulation on ${canDevice}: ${err.message}`)
+      })
+
       h5000.start()
       app.setPluginStatus(`Claiming an address on ${canDevice}`)
+
+      // Signal K's own canbus provider reads the same bus, so silence here
+      // means the wrong interface (or the interface is down).
+      var emulator = h5000
+      timers.push(setTimeout(() => {
+        if (h5000 === emulator && emulator.framesReceived === 0) {
+          app.setPluginError(`H5000 emulation: no CAN frames received on ${canDevice} in 5 s. Check "Candevice" (ip link show).`)
+        }
+      }, 5000))
     }
 
     var onAnalyzer = function (n2k) {
@@ -1113,17 +1115,6 @@ module.exports = function (app) {
   }
 
   return plugin
-}
-
-// socketcan is installed with Signal K's canboatjs, not by this plugin.
-function loadSocketcan () {
-  try {
-    return require('socketcan')
-  } catch (err) {
-    const path = require('path')
-    const base = path.dirname(require.resolve('@canboat/canboatjs'))
-    return require(require.resolve('socketcan', { paths: [base] }))
-  }
 }
 
 const byteToHex = []

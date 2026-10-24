@@ -122,13 +122,26 @@ With emulate on, the plugin opens its own socketcan channel and is one NMEA 2000
 | 126464 PGN List | Transmit and receive lists, on request. | not in the capture |
 | 59392 ISO Acknowledgement | NAK for any other PGN requested from this address directly. | not in the capture |
 
-Address claim follows ISO 11783-5. At start the plugin asks every device for its claim, waits one second and claims **Source address** if nobody holds it, otherwise the next free address. It sends nothing else for 250 ms after the claim. If another device later claims the same address, the lower NAME keeps it and the other moves on. The plugin status shows the address in use. 65305, 130824, 130306 and the rebroadcast PGNs always go out from that address.
+Address claim follows ISO 11783-5. At start the plugin asks every device for its claim, waits one second and claims **Source address** if nobody holds it, otherwise the next free address. An address that was heard sending anything in that second also counts as taken, since some devices never answer the request. It sends nothing else for 250 ms after the claim. If another device later claims the same address, the lower NAME keeps it and the other moves on. The plugin status shows the address in use. 65305, 130824, 130306 and the rebroadcast PGNs always go out from that address.
 
 Changing the manufacturer from Navico to B&G changes the device NAME. A Zeus or Triton2 that had the old emulator chosen as a data source must have it chosen again once (Target TWA, target boat speed, laylines).
 
 Earlier versions used canboatjs SimpleCan. It claimed as Navico "Internal Environment" with product code 246, sent no heartbeat or 126998, compared Signal K 2.x camelCase claims as if they were canboatjs 1.x field names, and did not close its channel on plugin restart, so every settings save added another device to the bus.
 
 A real CPU also claims several virtual devices with their own addresses (`Hercules Boat Speed 1`, `Hercules Analog 1`, `Hercules NMEA0183 1`, `Hercules Barometer` and so on, all product code 25506). The plugin does not emulate those. The main device is the one that sends 130824 and 130306.
+
+### Interface and errors
+
+The CAN interface is **Candevice**, or else the first enabled Signal K NMEA 2000 socketcan connection (Signal K 2.x `canbus-canboatjs` with its `interface`, or a 1.x `providers/canbus`), or else `can0`. `socketcan` is loaded from the plugin, or else from the Signal K server's own install, because the plugin's optional copy usually does not build under `~/.signalk`.
+
+The plugin status says what went wrong instead of staying silent:
+
+| Status | Meaning |
+|---|---|
+| `H5000 Hercules on can0 at address 20` | Running. |
+| `H5000 emulation: cannot open can0 (socketcan not found …)` | The native module is missing. |
+| `H5000 emulation: no CAN frames received on can0 in 5 s` | Wrong interface, or it is down. |
+| `H5000 emulation on can0: <error>` | Sending failed (for example `Network is down`). |
 
 ### Checking it on the boat
 

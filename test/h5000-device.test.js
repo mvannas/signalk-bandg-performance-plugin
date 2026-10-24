@@ -227,3 +227,31 @@ test('sendPGN sends long lines as a fast packet from the claimed address', () =>
     mock.timers.reset()
   }
 })
+
+test('avoids addresses that send traffic without answering the claim request', () => {
+  mock.timers.enable({ apis: ['setTimeout', 'setInterval'] })
+  try {
+    const channel = fakeChannel()
+    const device = startDevice(channel)
+    channel.receive(6, 60928, 14, 255, WIND_SENSOR_NAME)
+    channel.receive(7, 65305, 15, 255, [0x41, 0x9f, 0x01, 0x0b, 0, 0, 0, 0])
+    mock.timers.tick(1000)
+    mock.timers.tick(250)
+    assert.equal(device.address, 16)
+    assert.equal(device.framesReceived, 2)
+    device.stop()
+  } finally {
+    mock.timers.reset()
+  }
+})
+
+test('a send error is reported once, not per frame', () => {
+  const channel = fakeChannel()
+  channel.send = () => { throw new Error('Network is down') }
+  const device = new H5000Device({ channel, preferredAddress: 14 })
+  const errors = []
+  device.on('error', (err) => errors.push(err.message))
+  device.sendFrame(6, 60928, 255, device.name)
+  device.sendFrame(6, 60928, 255, device.name)
+  assert.deepEqual(errors, ['Network is down'])
+})
