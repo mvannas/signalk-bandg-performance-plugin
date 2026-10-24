@@ -37,14 +37,14 @@ test('recorded Zeus start, stop and duration', () => {
   assert.equal(parseN2k(recordedStart).command, 'start')
   assert.equal(parseN2k(recordedStart).seconds, undefined)
   assert.equal(parseN2k(recordedStop).command, 'stop')
-  assert.deepEqual(parseN2k(recordedDuration), { command: 'duration', seconds: 300, value: 50 })
+  assert.deepEqual(parseN2k(recordedDuration), { command: 'duration', seconds: 3000, value: 50 })
 })
 
 test('recorded messages also parse from the candump lines alone', () => {
   const noRaw = m => Object.assign({}, m, { rawData: undefined })
   assert.equal(parseN2k(noRaw(recordedStart)).command, 'start')
   assert.equal(parseN2k(noRaw(recordedStop)).command, 'stop')
-  assert.equal(parseN2k(noRaw(recordedDuration)).seconds, 300)
+  assert.equal(parseN2k(noRaw(recordedDuration)).seconds, 3000)
 })
 
 test('130845 other keys and reads are ignored', () => {
@@ -163,7 +163,7 @@ test('recorded Zeus messages reach Racer through N2KAnalyzerOut', async () => {
   assert.deepEqual(app.puts.map(p => p.value), [
     { command: 'start' },
     { command: 'stop' },
-    { command: 'adjust', delta: 180 }
+    { command: 'adjust', delta: 2880 }
   ])
 })
 

@@ -208,7 +208,7 @@ Commands: PGN 130850 *Simnet: Event Command: Timer* (canboat `simnetEventCommand
 | Race Timer Sync | 63 | `sync` (to the nearest minute) |
 | Race Timer Reset | 64 | `reset`, then the MFD length |
 
-Length: PGN 130845 *Simnet: Key Value*, key 16903 *Race timer duration*, operation 1 (set). The recorded value was 50; canboat lists a 60 s resolution, which would be 50 minutes, so the plugin takes the unit as 0.1 minute (50 → 5:00). A new length is applied to Racer only while its clock is not running (`adjust` to the new length), and is remembered for later resets.
+Length: PGN 130845 *Simnet: Key Value*, key 16903 *Race timer duration*, operation 1 (set). The value is in whole minutes (canboat: 60 s resolution); 50 minutes set on the Zeus was sent as 50. A new length is applied to Racer only while its clock is not running (`adjust` to the new length), and is remembered for later resets.
 
 Raw bytes are used whenever they are available: in emulate mode the frames from the bus, otherwise `rawData` or the candump `input` lines of `N2KAnalyzerOut`. Signal K's canboatjs may decode 130850 as *Simnet: AP command* without the event fields, so decoded fields are only a fallback. The same command seen twice within a second is handled once.
 
